@@ -1,0 +1,3 @@
+### Get the awards intervals
+GET http://localhost:8080/api/awards/intervals
+Accept: application/json
