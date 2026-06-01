@@ -72,7 +72,10 @@ public class AwardService {
     }
 
     public AwardIntervalResponse calculateIntervals() {
+        log.info("Starting calculation of award intervals...");
+
         List<ProducerWin> allWins = repository.findAllByOrderByWinYearAsc();
+        log.info("Fetched {} total win records from the database", allWins.size());
 
         Map<String, List<Integer>> winsByProducer = allWins.stream()
                 .collect(Collectors.groupingBy(
@@ -82,11 +85,13 @@ public class AwardService {
                                 Collectors.toList()
                         )
                 ));
+        log.info("Grouped wins by producer. Found {} unique producers.", winsByProducer.size());
 
         List<IntervalData> allIntervals = new ArrayList<>();
 
         winsByProducer.forEach((producer, years) -> {
             if (years.size() > 1) {
+                log.debug("Calculating intervals for producer '{}' who has {} wins", producer, years.size());
                 // groupingBy does not guarantee encounter order within each group
                 Collections.sort(years);
 
@@ -94,6 +99,9 @@ public class AwardService {
                     int previousWin = years.get(i);
                     int followingWin = years.get(i + 1);
                     int interval = followingWin - previousWin;
+
+                    log.debug("Interval for '{}': {} years ({} to {})", producer, interval, previousWin, followingWin);
+
                     allIntervals.add(
                             new IntervalData(producer, interval,
                                     previousWin, followingWin)
@@ -102,7 +110,10 @@ public class AwardService {
             }
         });
 
+        log.info("Finished calculating intervals. Generated {} discrete intervals from producers with multiple wins.", allIntervals.size());
+
         if (allIntervals.isEmpty()) {
+            log.info("No producers with multiple wins were found. Returning empty lists.");
             return new AwardIntervalResponse(
                     Collections.emptyList(), Collections.emptyList());
         }
@@ -115,6 +126,8 @@ public class AwardService {
                 .mapToInt(IntervalData::getInterval)
                 .max().getAsInt();
 
+        log.info("Determined the overall minimum interval to be {} years and the maximum to be {} years.", minInterval, maxInterval);
+
         Comparator<IntervalData> byPreviousWinThenProducer =
                 Comparator.comparingInt(IntervalData::getPreviousWin)
                         .thenComparing(IntervalData::getProducer);
@@ -123,12 +136,15 @@ public class AwardService {
                 .filter(i -> i.getInterval() == minInterval)
                 .sorted(byPreviousWinThenProducer)
                 .collect(Collectors.toList());
+        log.info("Found {} interval record(s) matching the minimum interval of {} years.", minList.size(), minInterval);
 
         List<IntervalData> maxList = allIntervals.stream()
                 .filter(i -> i.getInterval() == maxInterval)
                 .sorted(byPreviousWinThenProducer)
                 .collect(Collectors.toList());
+        log.info("Found {} interval record(s) matching the maximum interval of {} years.", maxList.size(), maxInterval);
 
+        log.info("Calculation completed successfully. Returning final response.");
         return new AwardIntervalResponse(minList, maxList);
     }
 }
