@@ -10,7 +10,6 @@ import com.outsera.award.repository.ProducerIntervalViewRepository;
 import com.outsera.award.repository.ProducerRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -29,7 +28,6 @@ public class AwardService {
     private final ProducerIntervalViewRepository intervalViewRepository;
     private final CsvProcessorService csvProcessor;
 
-    @Autowired
     public AwardService(MovieRepository movieRepository,
                         ProducerRepository producerRepository,
                         ProducerIntervalViewRepository intervalViewRepository,
@@ -49,13 +47,11 @@ public class AwardService {
 
         List<CsvProcessorService.MovieRecord> records = csvProcessor.parseCsv("movielist.csv");
 
-        // Collect all unique producer names across every movie (winner or not)
         Set<String> allNames = new LinkedHashSet<>();
         for (CsvProcessorService.MovieRecord r : records) {
             allNames.addAll(r.getProducers());
         }
 
-        // Persist producers in batches
         List<Producer> producerList = new ArrayList<>();
         for (String name : allNames) {
             producerList.add(new Producer(name));
@@ -71,7 +67,6 @@ public class AwardService {
                 .stream()
                 .collect(Collectors.toMap(Producer::getName, p -> p));
 
-        // Build and persist movies in batches
         List<Movie> movies = new ArrayList<>();
         for (CsvProcessorService.MovieRecord rec : records) {
             Movie movie = new Movie();
