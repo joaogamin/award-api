@@ -1,3 +1,8 @@
 ### Get the awards intervals
 GET http://localhost:8080/api/awards/intervals
 Accept: application/json
+
+
+### Get the H2 DB
+GET http://localhost:8080/h2-console
+Accept: application/json

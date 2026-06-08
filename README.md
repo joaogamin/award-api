@@ -80,12 +80,10 @@ The embedded H2 console is available at `http://localhost:8080/h2-console` while
 | Testing | JUnit 5, Spring Boot Test | — |
 
 
-## Future Improvements (Architectural Vision)
+## Architecture
 
-While the current architecture (in-heap parsing and H2 in-memory DB) perfectly satisfies the requirements of a fast, local, and contained execution for this test, a production-ready system dealing with daily file integrations (especially in critical contexts) would benefit from the following evolution:
+The persistence layer uses a normalised 3NF model (`movie`, `producer`, `movie_producer`) created entirely via `schema.sql` — Hibernate runs with `ddl-auto=none` and does not alter the schema.
 
-*   **Batch Processing:** Transitioning from synchronous inline parsing to a robust chunk-based processing model (e.g., using Spring Batch) to handle massive CSV files efficiently without memory exhaustion.
-*   **Idempotency & Upserts:** Implementing database constraints and upsert logic to ensure that processing the same file multiple times does not result in duplicated records (handling full vs. delta daily loads).
-*   **Event-Driven Ingestion:** If the file is submitted via a REST endpoint or an external source, the processing should be decoupled using messaging queues (e.g., Kafka, RabbitMQ, or JMS) to process the data asynchronously and return immediate feedback to the client.
-*   **Fault Tolerance (Skip Policy):** Implementing strict skip-policies for malformed CSV lines, directing them to a Dead Letter Table/Queue for business review, rather than rolling back or failing the entire batch integration.
-*   **Observability:** Adding externalized metrics and logging to monitor processing duration, total records ingested, and error rates during the daily pipeline.
+Interval calculation is delegated to a SQL `VIEW` (`vw_producer_intervals`) using the `LEAD()` window function partitioned by producer. The Java service only executes two queries (`MIN` / `MAX`) and maps the results — no loop-based interval arithmetic in application code.
+
+CSV data is loaded at startup in batches of 50 via `@EventListener(ApplicationReadyEvent.class)`, which fires after `schema.sql` has run.
