@@ -2,17 +2,19 @@ package com.outsera.award.service;
 
 import com.outsera.award.dto.AwardIntervalResponse;
 import com.outsera.award.dto.IntervalData;
-import com.outsera.award.model.ProducerWin;
-import com.outsera.award.repository.ProducerWinRepository;
+import com.outsera.award.model.Movie;
+import com.outsera.award.model.Producer;
+import com.outsera.award.model.ProducerIntervalView;
+import com.outsera.award.repository.MovieRepository;
+import com.outsera.award.repository.ProducerIntervalViewRepository;
+import com.outsera.award.repository.ProducerRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.core.io.ClassPathResource;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.PostConstruct;
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -20,131 +22,105 @@ import java.util.stream.Collectors;
 public class AwardService {
 
     private static final Logger log = LoggerFactory.getLogger(AwardService.class);
+    private static final int BATCH_SIZE = 50;
 
-    private final ProducerWinRepository repository;
+    private final MovieRepository movieRepository;
+    private final ProducerRepository producerRepository;
+    private final ProducerIntervalViewRepository intervalViewRepository;
+    private final CsvProcessorService csvProcessor;
 
     @Autowired
-    public AwardService(ProducerWinRepository repository) {
-        this.repository = repository;
+    public AwardService(MovieRepository movieRepository,
+                        ProducerRepository producerRepository,
+                        ProducerIntervalViewRepository intervalViewRepository,
+                        CsvProcessorService csvProcessor) {
+        this.movieRepository = movieRepository;
+        this.producerRepository = producerRepository;
+        this.intervalViewRepository = intervalViewRepository;
+        this.csvProcessor = csvProcessor;
     }
 
-    @PostConstruct
+    @EventListener(ApplicationReadyEvent.class)
     public void initData() {
-        repository.deleteAll();
-        int count = 0;
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(
-                        new ClassPathResource("movielist.csv").getInputStream()
-                ))) {
-
-            String line = br.readLine();
-
-            while ((line = br.readLine()) != null) {
-                String[] data = line.split(";");
-
-                if (data.length < 4) continue;
-
-                boolean isWinner = data.length == 5 &&
-                        "yes".equalsIgnoreCase(data[4].trim());
-
-                if (isWinner) {
-                    Integer year = Integer.parseInt(data[0].trim());
-                    String[] producers = parseProducers(data[3]);
-
-                    for (String producer : producers) {
-                        repository.save(new ProducerWin(producer, year));
-                        count++;
-                    }
-                }
-            }
-
-            log.info("Loaded {} producer win records from movielist.csv", count);
-        } catch (Exception e) {
-            log.error("Failed to load initial data from movielist.csv", e);
+        if (movieRepository.count() > 0) {
+            log.info("Database already populated — skipping CSV load (idempotency guard)");
+            return;
         }
-    }
 
-    private String[] parseProducers(String rawProducers) {
-        return Arrays.stream(rawProducers.replace(" and ", ", ").split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .toArray(String[]::new);
+        List<CsvProcessorService.MovieRecord> records = csvProcessor.parseCsv("movielist.csv");
+
+        // Collect all unique producer names across every movie (winner or not)
+        Set<String> allNames = new LinkedHashSet<>();
+        for (CsvProcessorService.MovieRecord r : records) {
+            allNames.addAll(r.getProducers());
+        }
+
+        // Persist producers in batches
+        List<Producer> producerList = new ArrayList<>();
+        for (String name : allNames) {
+            producerList.add(new Producer(name));
+        }
+        for (int i = 0; i < producerList.size(); i += BATCH_SIZE) {
+            int end = Math.min(i + BATCH_SIZE, producerList.size());
+            producerRepository.saveAll(producerList.subList(i, end));
+        }
+        log.info("Persisted {} unique producers", producerList.size());
+
+        // Re-fetch producers so all entities are persistent (have IDs) in the current JVM heap
+        Map<String, Producer> producerMap = producerRepository.findAll()
+                .stream()
+                .collect(Collectors.toMap(Producer::getName, p -> p));
+
+        // Build and persist movies in batches
+        List<Movie> movies = new ArrayList<>();
+        for (CsvProcessorService.MovieRecord rec : records) {
+            Movie movie = new Movie();
+            movie.setTitle(rec.getTitle());
+            movie.setReleaseYear(rec.getYear());
+            movie.setWinner(rec.isWinner());
+
+            List<Producer> movieProducers = new ArrayList<>();
+            for (String name : rec.getProducers()) {
+                Producer p = producerMap.get(name);
+                if (p != null) movieProducers.add(p);
+            }
+            movie.setProducers(movieProducers);
+            movies.add(movie);
+        }
+
+        for (int i = 0; i < movies.size(); i += BATCH_SIZE) {
+            int end = Math.min(i + BATCH_SIZE, movies.size());
+            movieRepository.saveAll(movies.subList(i, end));
+        }
+        log.info("Persisted {} movies from CSV", movies.size());
     }
 
     public AwardIntervalResponse calculateIntervals() {
-        log.info("Starting calculation of award intervals...");
+        Integer minInterval = intervalViewRepository.findMinIntervalDiff();
+        Integer maxInterval = intervalViewRepository.findMaxIntervalDiff();
 
-        List<ProducerWin> allWins = repository.findAllByOrderByWinYearAsc();
-        log.info("Fetched {} total win records from the database", allWins.size());
-
-        Map<String, List<Integer>> winsByProducer = allWins.stream()
-                .collect(Collectors.groupingBy(
-                        ProducerWin::getProducerName,
-                        Collectors.mapping(
-                                ProducerWin::getWinYear,
-                                Collectors.toList()
-                        )
-                ));
-        log.info("Grouped wins by producer. Found {} unique producers.", winsByProducer.size());
-
-        List<IntervalData> allIntervals = new ArrayList<>();
-
-        winsByProducer.forEach((producer, years) -> {
-            if (years.size() > 1) {
-                log.debug("Calculating intervals for producer '{}' who has {} wins", producer, years.size());
-                // groupingBy does not guarantee encounter order within each group
-                Collections.sort(years);
-
-                for (int i = 0; i < years.size() - 1; i++) {
-                    int previousWin = years.get(i);
-                    int followingWin = years.get(i + 1);
-                    int interval = followingWin - previousWin;
-
-                    log.debug("Interval for '{}': {} years ({} to {})", producer, interval, previousWin, followingWin);
-
-                    allIntervals.add(
-                            new IntervalData(producer, interval,
-                                    previousWin, followingWin)
-                    );
-                }
-            }
-        });
-
-        log.info("Finished calculating intervals. Generated {} discrete intervals from producers with multiple wins.", allIntervals.size());
-
-        if (allIntervals.isEmpty()) {
-            log.info("No producers with multiple wins were found. Returning empty lists.");
-            return new AwardIntervalResponse(
-                    Collections.emptyList(), Collections.emptyList());
+        if (minInterval == null) {
+            return new AwardIntervalResponse(Collections.emptyList(), Collections.emptyList());
         }
 
-        int minInterval = allIntervals.stream()
-                .mapToInt(IntervalData::getInterval)
-                .min().getAsInt();
+        Comparator<ProducerIntervalView> byYearThenName =
+                Comparator.comparingInt(ProducerIntervalView::getPreviousWin)
+                        .thenComparing(ProducerIntervalView::getProducerName);
 
-        int maxInterval = allIntervals.stream()
-                .mapToInt(IntervalData::getInterval)
-                .max().getAsInt();
-
-        log.info("Determined the overall minimum interval to be {} years and the maximum to be {} years.", minInterval, maxInterval);
-
-        Comparator<IntervalData> byPreviousWinThenProducer =
-                Comparator.comparingInt(IntervalData::getPreviousWin)
-                        .thenComparing(IntervalData::getProducer);
-
-        List<IntervalData> minList = allIntervals.stream()
-                .filter(i -> i.getInterval() == minInterval)
-                .sorted(byPreviousWinThenProducer)
+        List<IntervalData> minList = intervalViewRepository.findByIntervalDiff(minInterval)
+                .stream()
+                .sorted(byYearThenName)
+                .map(v -> new IntervalData(v.getProducerName(), v.getIntervalDiff(),
+                        v.getPreviousWin(), v.getFollowingWin()))
                 .collect(Collectors.toList());
-        log.info("Found {} interval record(s) matching the minimum interval of {} years.", minList.size(), minInterval);
 
-        List<IntervalData> maxList = allIntervals.stream()
-                .filter(i -> i.getInterval() == maxInterval)
-                .sorted(byPreviousWinThenProducer)
+        List<IntervalData> maxList = intervalViewRepository.findByIntervalDiff(maxInterval)
+                .stream()
+                .sorted(byYearThenName)
+                .map(v -> new IntervalData(v.getProducerName(), v.getIntervalDiff(),
+                        v.getPreviousWin(), v.getFollowingWin()))
                 .collect(Collectors.toList());
-        log.info("Found {} interval record(s) matching the maximum interval of {} years.", maxList.size(), maxInterval);
 
-        log.info("Calculation completed successfully. Returning final response.");
         return new AwardIntervalResponse(minList, maxList);
     }
 }
