@@ -30,8 +30,9 @@ public class AwardApiIntegrationTest {
 		assertNotNull(body);
 		assertNotNull(body.getMin());
 		assertNotNull(body.getMax());
-		assertFalse(body.getMin().isEmpty());
-		assertFalse(body.getMax().isEmpty());
+		// Exact array sizes — any extra/modified row in the CSV changes these counts and fails the build
+		assertEquals(1, body.getMin().size());
+		assertEquals(1, body.getMax().size());
 
 		assertEquals("Joel Silver", body.getMin().get(0).getProducer());
 		assertEquals(1, body.getMin().get(0).getInterval());
